@@ -1,0 +1,70 @@
+/* ============================================
+   设计变量(浅色 / 深色)
+   ============================================ */
+:root {
+  --bg: #ffffff;
+  --bg-2: #f7f8fa;
+  --bg-3: #eef0f4;
+  --ink: #1a1d24;
+  --ink-2: #4a5260;
+  --muted: #8a93a3;
+  --rule: #e2e6ed;
+  --rule-strong: #c9d0db;
+  --accent: #4f7cff;
+  --accent-soft: #eaf0ff;
+  --warn: #ff6b4a;
+  --warn-soft: #fff0ec;
+  --ok: #20c997;
+  --shadow: 0 1px 2px rgba(20, 30, 50, 0.04), 0 4px 12px rgba(20, 30, 50, 0.04);
+  --radius: 6px;
+  --radius-sm: 4px;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+             "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", Consolas,
+               "Liberation Mono", Menlo, monospace;
+}
+
+[data-theme="dark"] {
+  --bg: #1a1d24;
+  --bg-2: #22262f;
+  --bg-3: #2c313c;
+  --ink: #e6e9ef;
+  --ink-2: #b6bcc8;
+  --muted: #7c8493;
+  --rule: #353a45;
+  --rule-strong: #4a5161;
+  --accent: #6e91ff;
+  --accent-soft: #2a3556;
+  --warn: #ff7e62;
+  --warn-soft: #3a2620;
+  --ok: #3ddbb0;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root { height: 100%; }
+body {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--bg);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+button {
+  font-family: inherit;
+  font-size: inherit;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+}
+input, textarea {
+  font-family: inherit;
+  font-size: inherit;
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--rule-strong); border-radius: 5px; border: 2px solid var(--bg-2); }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+::-webkit-scrollbar-track { background: transparent; }
