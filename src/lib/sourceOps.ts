@@ -21,16 +21,36 @@ type Decl =
   | { kind: 'node'; line: number; id?: string; shape: NodeShape | 'unknown'; text: string; edgeTo?: string; edgeLabel?: string }
   | { kind: 'edge'; line: number; from: string; to: string; label?: string }
 
-const NODE_RE = /^\s*(?:(\w+))?\s*([(\[{]{1,2}|[(]\()\s*(.+?)\s*([)\]}]+|[\])]\))/;
+// 节点文本匹配:支持双引号包裹的文本(如 P["text[4]"]),括号内为字面量
+// (?:"[^"]*"|.)*? 将 "..." 作为一个整体匹配,避免内部括号被误判为闭合符
+const NODE_TEXT_RE = `(?:"[^"]*"|.)*?`
+
+/** 剥离 Mermaid 节点文本外层双引号(如 "text[4]" → text[4]) */
+function stripQuotes(text: string): string {
+  const t = text.trim()
+  if (t.startsWith('"') && t.endsWith('"') && t.length >= 2) {
+    return t.slice(1, -1)
+  }
+  return t
+}
+
+/** 如果文本含特殊字符,用双引号包裹(Mermaid 语法要求) */
+function wrapTextIfNeeded(text: string): string {
+  if (/[\[\]{}<>&"]/.test(text)) {
+    return `"${text}"`
+  }
+  return text
+}
+const NODE_RE = new RegExp(`^\\s*(?:(\\w+))?\\s*([(\\[{]{1,2}|[(]\\()\\s*(${NODE_TEXT_RE})\\s*([)\\]}]+|[\\])]\\))`);
 const EDGE_RE = /^\s*(\w+)\s*(?:--+>|=+>|--+|-\.->)\s*(?:\|([^|]*)\|\s*)?(\w+)\s*$/;
 // "A[开始] --> B" 这种行 — 显式声明 + 边的组合
 // 注意:字符类里 [ 和 { 必须转义(否则 { 是量词的开始)
-const NODE_AND_EDGE_RE = /^\s*(\w+)\s*([(\[{])\s*(.+?)\s*([)\]}])\s*(?:--+>|=+>|--+|-\.->)\s*(?:\|([^|]*)\|\s*)?(\w+)(?:\s*([(\[{])\s*(.+?)\s*([)\]}]))?\s*(?:\s*-->\s*(?:\|([^|]*)\|\s*)?(\w+))?\s*$/;
+const NODE_AND_EDGE_RE = new RegExp(`^\\s*(\\w+)\\s*([(\\[{])\\s*(${NODE_TEXT_RE})\\s*([)\\]}])\\s*(?:--+>|=+>|--+|-\.->)\\s*(?:\\|([^|]*)\\|\\s*)?(\\w+)(?:\\s*([(\\[{])\\s*(${NODE_TEXT_RE})\\s*([)\\]}]))?\\s*(?:\\s*-->\\s*(?:\\|([^|]*)\\|\\s*)?(\\w+))?\\s*$`);
 // "B -->|是| C[处理 A]" 这种行 — 边(可能带标签) + 目标节点声明(无前置节点声明)
 // 即:首个词没有括号,但末尾有节点声明
-const EDGE_AND_NODE_RE = /^\s*(\w+)\s*(?:--+>|=+>|--+|-\.->)\s*(?:\|([^|]*)\|\s*)?(\w+)\s*([(\[{])\s*(.+?)\s*([)\]}])\s*$/;
+const EDGE_AND_NODE_RE = new RegExp(`^\\s*(\\w+)\\s*(?:--+>|=+>|--+|-\.->)\\s*(?:\\|([^|]*)\\|\\s*)?(\\w+)\\s*([(\\[{])\\s*(${NODE_TEXT_RE})\\s*([)\\]}])\\s*$`);
 // 单行节点声明(A[开始])
-const NODE_ONLY_RE = /^\s*(?:(\w+))?\s*([(\[{])\s*(.+?)\s*([)\]}])\s*$/;
+const NODE_ONLY_RE = new RegExp(`^\\s*(?:(\\w+))?\\s*([(\\[{])\\s*(${NODE_TEXT_RE})\\s*([)\\]}])\\s*$`);
 
 function parseLine(line: string, lineNo: number, allIds: Set<string>): Decl | null {
   const trimmed = line.trim()
@@ -44,14 +64,14 @@ function parseLine(line: string, lineNo: number, allIds: Set<string>): Decl | nu
   if (neMatch) {
     const id = neMatch[1]
     const open = neMatch[2]
-    const text = neMatch[3].trim()
+    const text = stripQuotes(neMatch[3])
     const close = neMatch[4]
     const shape = shapeFromBrackets(open, close)
     if (id) allIds.add(id)
     const tgtId = neMatch[6]
     if (tgtId) allIds.add(tgtId)
     const tgtOpen = neMatch[7]
-    const tgtText = neMatch[8]?.trim()
+    const tgtText = neMatch[8] ? stripQuotes(neMatch[8]) : undefined
     const tgtClose = neMatch[9]
     const tgtShape = tgtOpen && tgtClose ? shapeFromBrackets(tgtOpen, tgtClose) : undefined
     return { kind: 'node', line: lineNo, id, shape, text, edgeTo: tgtId, edgeLabel: neMatch[5], tgtShape, tgtText } as any
@@ -64,7 +84,7 @@ function parseLine(line: string, lineNo: number, allIds: Set<string>): Decl | nu
     const label = enMatch[2]
     const to = enMatch[3]
     const nodeOpen = enMatch[4]
-    const nodeText = enMatch[5].trim()
+    const nodeText = stripQuotes(enMatch[5])
     const nodeClose = enMatch[6]
     if (to) allIds.add(to)
     // 返回一个特殊 decl,同时包含边信息和节点信息
@@ -88,7 +108,7 @@ function parseLine(line: string, lineNo: number, allIds: Set<string>): Decl | nu
   if (nodeMatch) {
     const id = nodeMatch[1]
     const open = nodeMatch[2]
-    const text = nodeMatch[3].trim()
+    const text = stripQuotes(nodeMatch[3])
     const close = nodeMatch[4]
     const shape = shapeFromBrackets(open, close)
     if (id) allIds.add(id)
@@ -262,9 +282,10 @@ function collectIds(source: string): Set<string> {
 
 function shapeWrap(shape: NodeShape, text: string): string {
   const def = SHAPE_DEFS.find((d) => d.shape === shape)
-  if (!def) return `[${text}]`
+  if (!def) return `[${wrapTextIfNeeded(text)}]`
   // Mermaid 节点文本里换行用 <br/>
-  const safe = text.replace(/\n/g, '<br/>')
+  let safe = text.replace(/\n/g, '<br/>')
+  safe = wrapTextIfNeeded(safe)
   return `${def.open}${safe}${def.close}`
 }
 
@@ -381,15 +402,16 @@ export function removeEdge(source: string, from: string, to: string, label?: str
 export function setNodeText(source: string, id: string, text: string): string {
   const lines = source.split('\n')
   // 匹配: 指定ID + 开括号 + 文本 + 闭括号,不限于行首
+  // 支持双引号文本 P["text[4]"]
   const nodeDeclRe = new RegExp(
-    `(${id})\\s*([(\\[{]{1,2}|[(]\\()\\s*(.*?)\\s*([)\\]}]+|[\\])]\\))`
+    `(${id})\\s*([(\\[{]{1,2}|[(]\\()\\s*(${NODE_TEXT_RE})\\s*([)\\]}]+|[\\])]\\))`
   )
   for (let i = 0; i < lines.length; i++) {
     const t = lines[i]
     if (!t.trim() || t.trim().startsWith('%%')) continue
     const m = t.match(nodeDeclRe)
     if (m && m[1] === id) {
-      lines[i] = t.replace(m[0], `${id}${m[2]}${text}${m[4]}`)
+      lines[i] = t.replace(m[0], `${id}${m[2]}${wrapTextIfNeeded(text)}${m[4]}`)
       return lines.join('\n')
     }
   }
@@ -400,14 +422,15 @@ export function setNodeText(source: string, id: string, text: string): string {
 export function setNodeShape(source: string, id: string, shape: NodeShape): string {
   const lines = source.split('\n')
   const nodeDeclRe = new RegExp(
-    `(${id})\\s*([(\\[{]{1,2}|[(]\\()\\s*(.*?)\\s*([)\\]}]+|[\\])]\\))`
+    `(${id})\\s*([(\\[{]{1,2}|[(]\\()\\s*(${NODE_TEXT_RE})\\s*([)\\]}]+|[\\])]\\))`
   )
   for (let i = 0; i < lines.length; i++) {
     const t = lines[i]
     if (!t.trim() || t.trim().startsWith('%%')) continue
     const m = t.match(nodeDeclRe)
     if (m && m[1] === id) {
-      lines[i] = t.replace(m[0], `${id}${shapeWrap(shape, m[3])}`)
+      // 先剥离引号再传给 shapeWrap,避免双重引号
+      lines[i] = t.replace(m[0], `${id}${shapeWrap(shape, stripQuotes(m[3]))}`)
       return lines.join('\n')
     }
   }
