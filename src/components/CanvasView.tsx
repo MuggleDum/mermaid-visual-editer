@@ -204,12 +204,13 @@ export function CanvasView({
   const isNodeSelected = (id: string) =>
     selection.kind === 'node' && selection.ids.includes(id)
   // 上下游边高亮 — §4.2.1
-  const isEdgeRelated = (from: string, to: string) => {
+  const isEdgeRelated = (from: string, to: string, label?: string) => {
     if (selection.kind === 'node' && selection.ids.length > 0) {
       return selection.ids.includes(from) || selection.ids.includes(to)
     }
     if (selection.kind === 'edge' && selection.from === from && selection.to === to) {
-      return true
+      // 多条边时按 label 精确匹配
+      return selection.label === label
     }
     return false
   }
@@ -222,7 +223,9 @@ export function CanvasView({
       return !selection.ids.includes(e.from) && !selection.ids.includes(e.to)
     }
     if (selection.kind === 'edge') {
-      return !(selection.from === e.from && selection.to === e.to)
+      if (selection.from !== e.from || selection.to !== e.to) return true
+      // 多条边时按 label 精确匹配
+      return selection.label !== e.label
     }
     return false
   }
@@ -258,7 +261,7 @@ export function CanvasView({
       const matchLabel = matchFromTo && (selection.label === undefined || selection.label === label)
       if (matchLabel) g.classList.add('cv-selected')
       else g.classList.remove('cv-selected')
-      if (isEdgeRelated(from, to)) g.classList.add('cv-related')
+      if (isEdgeRelated(from, to, label)) g.classList.add('cv-related')
       else g.classList.remove('cv-related')
       if (isEdgeFaded(e)) g.classList.add('cv-faded')
       else g.classList.remove('cv-faded')
@@ -290,7 +293,7 @@ export function CanvasView({
         // 而 data-edge-label="直接" 的 g.label 反而是隐藏的(foreignObject width=0)。
         // 所以当 data-edge-label 是空字符串但有可见文本内容时,用文本内容作为标签。
         const textContent = (found.textContent || '').trim()
-        const label = raw === null ? undefined : (raw === '' && textContent ? textContent : raw)
+        const label = raw === null ? undefined : (raw === '' && textContent ? textContent : (raw || undefined))
         if (from && to) return { from, to, label } as CanvasEdge
       }
       return null
@@ -604,7 +607,7 @@ export function CanvasView({
           }
           e.preventDefault()
         } else if (selection.kind === 'edge') {
-          if (pendingDelete?.kind === 'edge' && pendingDelete.from === selection.from && pendingDelete.to === selection.to) {
+          if (pendingDelete?.kind === 'edge' && pendingDelete.from === selection.from && pendingDelete.to === selection.to && pendingDelete.label === selection.label) {
             const next = removeEdge(file.mermaidSource, selection.from, selection.to, selection.label)
             onSourceChange(next)
             onSelectionChange({ kind: 'none' })
@@ -868,7 +871,7 @@ export function CanvasView({
             let next = removeEdge(file.mermaidSource, from, to, selection.label)
             next = addEdge(next, newFrom, newTo)
             onSourceChange(next)
-            onSelectionChange({ kind: 'edge', from: newFrom, to: newTo })
+            onSelectionChange({ kind: 'edge', from: newFrom, to: newTo, label: selection.label })
           }}
         />
       )}
@@ -984,41 +987,87 @@ function injectNodeDataAttrs(svg: string, nodes: CanvasNode[], edges: CanvasEdge
     list.push(e.label ?? '')
     edgeLabelMap.set(key, list)
   }
-  // 每对 (from,to) 的计数器,用于匹配 SVG 中第 N 条路径
-  const edgeCounters = new Map<string, number>()
 
-  // 边 — path 形式:追加透明粗线用于点击检测
-  const edgePathRe = /<path\b([^>]*)\bid="(?:mermaid-[\w]+-[\w]+-)?L_([A-Za-z0-9_]+)_([A-Za-z0-9_]+)_\d+(_\d+)?"([^>]*)\/>/g
-  out = out.replace(edgePathRe, (full, before, from, to, suffix, after) => {
-    if (full.includes('data-edge-from=')) return full
-    const key = `${from}|${to}`
-    const idx = edgeCounters.get(key) ?? 0
-    edgeCounters.set(key, idx + 1)
+  // 边 — path 形式:收集所有匹配后按 counter 排序,再按序分配标签
+  // 这是因为 Mermaid 渲染 SVG 时 path 的顺序可能与源码边顺序不一致,
+  // 但 counter 值(0, 2, 3, ...)反映了边的创建顺序,排序后可正确匹配
+  const edgePathRe = /<path\b([^>]*)\bid="(?:mermaid-[\w]+-[\w]+-)?L_([A-Za-z0-9_]+)_([A-Za-z0-9_]+)_(\d+)(?:_\d+)?"([^>]*)\/>/g
+  const pathMatches: Array<{ full: string; from: string; to: string; counter: number; index: number }> = []
+  let pm: RegExpExecArray | null
+  while ((pm = edgePathRe.exec(out)) !== null) {
+    if (pm[0].includes('data-edge-from=')) continue
+    pathMatches.push({
+      full: pm[0],
+      from: pm[2],
+      to: pm[3],
+      counter: parseInt(pm[4], 10),
+      index: pm.index,
+    })
+  }
+  // 按 (from, to, counter) 排序,使标签分配与源码边顺序一致
+  pathMatches.sort((a, b) => {
+    if (a.from !== b.from) return a.from.localeCompare(b.from)
+    if (a.to !== b.to) return a.to.localeCompare(b.to)
+    return a.counter - b.counter
+  })
+  // 按 counter 排序后分配标签
+  const pathEdgeCounters = new Map<string, number>()
+  const pathReplacements: Array<{ original: string; replacement: string }> = []
+  for (const m of pathMatches) {
+    const key = `${m.from}|${m.to}`
+    const idx = pathEdgeCounters.get(key) ?? 0
+    pathEdgeCounters.set(key, idx + 1)
     const labels = edgeLabelMap.get(key) ?? []
     const label = labels[idx] ?? ''
-    const baseId = `L_${from}_${to}`
-    const injected = full.replace(/id="[^"]*"/, `id="${baseId}-x" data-edge-from="${from}" data-edge-to="${to}" data-edge-label="${label}"`)
-    const dMatch = full.match(/d="([^"]*)"/)
+    const baseId = `L_${m.from}_${m.to}`
+    const injected = m.full.replace(/id="[^"]*"/, `id="${baseId}-x" data-edge-from="${m.from}" data-edge-to="${m.to}" data-edge-label="${label}"`)
+    const dMatch = m.full.match(/d="([^"]*)"/)
     if (dMatch) {
-      const hitPath = `<path d="${dMatch[1]}" fill="none" stroke="transparent" stroke-width="16" data-edge-from="${from}" data-edge-to="${to}" data-edge-label="${label}" style="pointer-events:stroke" />`
-      return injected + hitPath
+      const hitPath = `<path d="${dMatch[1]}" fill="none" stroke="transparent" stroke-width="16" data-edge-from="${m.from}" data-edge-to="${m.to}" data-edge-label="${label}" style="pointer-events:stroke" />`
+      pathReplacements.push({ original: m.full, replacement: injected + hitPath })
+    } else {
+      pathReplacements.push({ original: m.full, replacement: injected })
     }
-    return injected
+  }
+  // 应用替换(每个 original 字符串唯一,直接 replace 即可)
+  for (const { original, replacement } of pathReplacements) {
+    out = out.replace(original, replacement)
+  }
+
+  // 边 — g 形式(edgeLabel):同样收集后按 counter 排序再分配标签
+  const edgeGRe = /<g\b([^>]*)\bid="(?:mermaid-[\w]+-[\w]+-)?L_([A-Za-z0-9_]+)_([A-Za-z0-9_]+)_(\d+)(?:_\d+)?"([^>]*)>/g
+  const gMatches: Array<{ full: string; from: string; to: string; counter: number; index: number }> = []
+  let gm: RegExpExecArray | null
+  while ((gm = edgeGRe.exec(out)) !== null) {
+    if (gm[0].includes('data-edge-from=')) continue
+    gMatches.push({
+      full: gm[0],
+      from: gm[2],
+      to: gm[3],
+      counter: parseInt(gm[4], 10),
+      index: gm.index,
+    })
+  }
+  gMatches.sort((a, b) => {
+    if (a.from !== b.from) return a.from.localeCompare(b.from)
+    if (a.to !== b.to) return a.to.localeCompare(b.to)
+    return a.counter - b.counter
   })
-  // 重置计数器,用于 g 形式边
-  edgeCounters.clear()
-  // 边 — g 形式:只注入 data 属性(靠 CSS pointer-events:all 扩大点击区)
-  const edgeGRe = /<g\b([^>]*)\bid="(?:mermaid-[\w]+-[\w]+-)?L_([A-Za-z0-9_]+)_([A-Za-z0-9_]+)_\d+(_\d+)?"([^>]*)>/g
-  out = out.replace(edgeGRe, (full, before, from, to, suffix, after) => {
-    if (full.includes('data-edge-from=')) return full
-    const key = `${from}|${to}`
-    const idx = edgeCounters.get(key) ?? 0
-    edgeCounters.set(key, idx + 1)
+  const gEdgeCounters = new Map<string, number>()
+  const gReplacements: Array<{ original: string; replacement: string }> = []
+  for (const m of gMatches) {
+    const key = `${m.from}|${m.to}`
+    const idx = gEdgeCounters.get(key) ?? 0
+    gEdgeCounters.set(key, idx + 1)
     const labels = edgeLabelMap.get(key) ?? []
     const label = labels[idx] ?? ''
-    const baseId = `L_${from}_${to}`
-    return full.replace(/id="[^"]*"/, `id="${baseId}-x" data-edge-from="${from}" data-edge-to="${to}" data-edge-label="${label}"`)
-  })
+    const baseId = `L_${m.from}_${m.to}`
+    const injected = m.full.replace(/id="[^"]*"/, `id="${baseId}-x" data-edge-from="${m.from}" data-edge-to="${m.to}" data-edge-label="${label}"`)
+    gReplacements.push({ original: m.full, replacement: injected })
+  }
+  for (const { original, replacement } of gReplacements) {
+    out = out.replace(original, replacement)
+  }
   return out
 }
 
@@ -1184,7 +1233,9 @@ function EdgeOverlay({ model, viewport, selection, svgRef, onAddEdge, onChangeEd
     >
       {/* 选中边的两端圆点 — 调端点 */}
       {selection.kind === 'edge' && (() => {
-        const e0 = model.edges.find((x) => x.from === selection.from && x.to === selection.to)
+        const e0 = model.edges.find((x) =>
+          x.from === selection.from && x.to === selection.to && x.label === selection.label
+        )
         if (!e0) return null
         const fromNode = model.nodes.find((n) => n.id === e0.from)
         const toNode = model.nodes.find((n) => n.id === e0.to)

@@ -25,7 +25,7 @@ const NODE_RE = /^\s*(?:(\w+))?\s*([(\[{]{1,2}|[(]\()\s*(.+?)\s*([)\]}]+|[\])]\)
 const EDGE_RE = /^\s*(\w+)\s*(?:--+>|=+>|--+|-\.->)\s*(?:\|([^|]*)\|\s*)?(\w+)\s*$/;
 // "A[开始] --> B" 这种行 — 显式声明 + 边的组合
 // 注意:字符类里 [ 和 { 必须转义(否则 { 是量词的开始)
-const NODE_AND_EDGE_RE = /^\s*(\w+)\s*([(\[{])\s*(.+?)\s*([)\]}])\s*(?:--+>|=+>|--+|-\.->)\s*(?:\|([^|]*)\|\s*)?(\w+)\s*(?:\s*-->\s*(?:\|([^|]*)\|\s*)?(\w+))?\s*$/;
+const NODE_AND_EDGE_RE = /^\s*(\w+)\s*([(\[{])\s*(.+?)\s*([)\]}])\s*(?:--+>|=+>|--+|-\.->)\s*(?:\|([^|]*)\|\s*)?(\w+)(?:\s*([(\[{])\s*(.+?)\s*([)\]}]))?\s*(?:\s*-->\s*(?:\|([^|]*)\|\s*)?(\w+))?\s*$/;
 // "B -->|是| C[处理 A]" 这种行 — 边(可能带标签) + 目标节点声明(无前置节点声明)
 // 即:首个词没有括号,但末尾有节点声明
 const EDGE_AND_NODE_RE = /^\s*(\w+)\s*(?:--+>|=+>|--+|-\.->)\s*(?:\|([^|]*)\|\s*)?(\w+)\s*([(\[{])\s*(.+?)\s*([)\]}])\s*$/;
@@ -39,6 +39,7 @@ function parseLine(line: string, lineNo: number, allIds: Set<string>): Decl | nu
   if (/^(?:subgraph|end)\b/i.test(trimmed)) return null
 
   // "A[开始] --> B" 这种单行声明 + 边 — 拆成两个 decl
+  // 支持目标节点也带声明,如 A[开始] -->|123| B{条件判断}
   const neMatch = trimmed.match(NODE_AND_EDGE_RE)
   if (neMatch) {
     const id = neMatch[1]
@@ -47,10 +48,13 @@ function parseLine(line: string, lineNo: number, allIds: Set<string>): Decl | nu
     const close = neMatch[4]
     const shape = shapeFromBrackets(open, close)
     if (id) allIds.add(id)
-    // 把节点 + 边分别推入 decls — 用一个 hack:返回第一个(节点),后续 parseLine 不会再处理这一行
-    // 但 parseLine 一次只返回一个 Decl — 这里用 side-effect 不可行。
-    // 简单:在 parseSource 主循环里检测 NODE_AND_EDGE_RE
-    return { kind: 'node', line: lineNo, id, shape, text, edgeTo: neMatch[6], edgeLabel: neMatch[5] } as any
+    const tgtId = neMatch[6]
+    if (tgtId) allIds.add(tgtId)
+    const tgtOpen = neMatch[7]
+    const tgtText = neMatch[8]?.trim()
+    const tgtClose = neMatch[9]
+    const tgtShape = tgtOpen && tgtClose ? shapeFromBrackets(tgtOpen, tgtClose) : undefined
+    return { kind: 'node', line: lineNo, id, shape, text, edgeTo: tgtId, edgeLabel: neMatch[5], tgtShape, tgtText } as any
   }
 
   // "B -->|是| C[处理 A]" 这种行 — 边(可能带标签) + 目标节点声明
@@ -165,6 +169,18 @@ export function parseSource(source: string): CanvasModel {
         to: d.edgeTo,
         label: d.edgeLabel,
       })
+      // 如果目标节点有声明(如 A[开始] -->|123| B{条件判断}),创建目标节点
+      const nd = d as any
+      if (nd.tgtShape && !nodeMap.has(d.edgeTo)) {
+        nodeMap.set(d.edgeTo, {
+          id: d.edgeTo,
+          ephemeral: false,
+          text: nd.tgtText || d.edgeTo,
+          shape: nd.tgtShape,
+          x: 0, y: 0,
+          sourceLine: d.line,
+        })
+      }
     }
   }
   // edge-and-node: 边 + 目标节点声明
@@ -341,18 +357,20 @@ export function removeNode(source: string, id: string): string {
   return next.join('\n')
 }
 
-/** 删边 — 支持按 label 精确匹配,解决多条边时删错行的问题 */
+/** 删边 — 支持按 label 精确匹配,解决多条边时删错行的问题
+ *  同时支持带节点声明的行(如 A[开始] -->|123| B{条件判断}) */
 export function removeEdge(source: string, from: string, to: string, label?: string): string {
   const lines = source.split('\n')
   const next = lines.filter((l) => {
     const t = l.trim()
     if (!t || t.startsWith('%%')) return true
-    const m = t.match(/^(\w+)\s*(-->|=+>|---|\.->)\s*(?:\|([^|]*)\|\s*)?(\w+)/)
+    // 使用 (.*?) 匹配节点声明(如 [开始], {条件判断}),兼容纯边行和带节点声明的行
+    const m = t.match(/^(\w+)(.*?)\s*(-->|=+>|---|\.->)\s*(?:\|([^|]*)\|\s*)?(\w+)/)
     if (!m) return true
-    if (m[1] === from && m[4] === to) {
+    if (m[1] === from && m[5] === to) {
       if (label === undefined) return false
-      // label='' 时匹配无标签边(m[3]为undefined); label有值时精确匹配
-      if (m[3] === label || (label === '' && m[3] === undefined)) return false
+      // label='' 时匹配无标签边(m[4]为undefined); label有值时精确匹配
+      if (m[4] === label || (label === '' && m[4] === undefined)) return false
     }
     return true
   })
