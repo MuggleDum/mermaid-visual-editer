@@ -470,23 +470,9 @@ export function CanvasView({
     }
     if (d?.type === 'edge-create' && d.fromNodeId && d.hoverNodeId) {
       // 创建连线
-      const fromNode = model.nodes.find((n) => n.id === d.fromNodeId)
-      const toNode = model.nodes.find((n) => n.id === d.hoverNodeId)
-      if (fromNode && toNode) {
-        const fromShape = fromNode.shape === 'unknown' ? 'rect' : fromNode.shape
-        const toShape = toNode.shape === 'unknown' ? 'rect' : toNode.shape
-        if (fromShape !== toShape) {
-          onToast('两端节点形状不同,Mermaid 不允许直接相连,需将目标改为矩形')
-          let next = file.mermaidSource
-          next = setNodeShape(next, d.hoverNodeId, 'rect')
-          next = addEdge(next, d.fromNodeId, d.hoverNodeId)
-          onSourceChange(next)
-        } else {
-          const next = addEdge(file.mermaidSource, d.fromNodeId, d.hoverNodeId)
-          onSourceChange(next)
-        }
-        onSelectionChange({ kind: 'edge', from: d.fromNodeId, to: d.hoverNodeId })
-      }
+      const next = addEdge(file.mermaidSource, d.fromNodeId, d.hoverNodeId)
+      onSourceChange(next)
+      onSelectionChange({ kind: 'edge', from: d.fromNodeId, to: d.hoverNodeId })
     }
     dragRef.current = null
     setDragLine(null)
@@ -503,7 +489,7 @@ export function CanvasView({
         if (id) {
           const n = model.nodes.find((x) => x.id === id)
           if (n) {
-            setEditingText({ id: n.id, value: n.text })
+            setEditingText({ id: n.id, value: n.text.replace(/<br\s*\/?>/gi, '\n') })
             e.preventDefault()
             e.stopPropagation()
           }
@@ -518,7 +504,7 @@ export function CanvasView({
         const textContent = (edgeEl.textContent || '').trim()
         const label = raw === null ? undefined : (raw === '' && textContent ? textContent : raw)
         if (from && to) {
-          setEditingEdgeLabel({ from, to, value: label ?? '', oldLabel: label })
+          setEditingEdgeLabel({ from, to, value: (label ?? '').replace(/<br\s*\/?>/gi, '\n'), oldLabel: label })
           e.preventDefault()
           e.stopPropagation()
         }
@@ -678,6 +664,20 @@ export function CanvasView({
         e.preventDefault()
         return
       }
+      // Insert — 选中节点时创建新节点并连线
+      if (e.key === 'Insert' && selection.kind === 'node' && selection.ids.length > 0) {
+        const tag = (e.target as HTMLElement | null)?.tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || editingText || editingEdgeLabel) return
+        e.preventDefault()
+        const selId = selection.ids[0]
+        const selNode = model.nodes.find((n) => n.id === selId)
+        const shape = selNode?.shape === 'unknown' ? 'rect' : (selNode?.shape ?? 'rect')
+        const result = addNode(file.mermaidSource, shape, 'New Node', { from: selId })
+        onSourceChange(result.source)
+        onSelectionChange({ kind: 'node', ids: [result.id] })
+        onToast(`已插入新节点并连线 ${selId} → ${result.id}`)
+        return
+      }
       // Shift+形状 改选中节点形状
       if (e.shiftKey && SHAPE_BY_KEY[k] && selection.kind === 'node' && selection.ids.length > 0) {
         e.preventDefault()
@@ -695,6 +695,9 @@ export function CanvasView({
       if (e.code === 'Space' && !e.repeat) {
         const tag = (e.target as HTMLElement | null)?.tagName
         if (tag !== 'INPUT' && tag !== 'TEXTAREA') {
+          // Monaco 编辑器内部也不拦截(Monaco 用 div 承载,textarea 是隐藏的)
+          const el = e.target as HTMLElement | null
+          if (el?.closest('.monaco-editor')) return
           setSpaceDown(true)
           e.preventDefault()
         }
@@ -714,19 +717,21 @@ export function CanvasView({
   // ==================== 文本编辑提交 ====================
   const commitText = useCallback(() => {
     if (!editingText) return
-    const next = setNodeText(file.mermaidSource, editingText.id, editingText.value)
+    const next = setNodeText(file.mermaidSource, editingText.id, editingText.value.replace(/\n/g, '<br>'))
     onSourceChange(next)
     setEditingText(null)
   }, [editingText, file.mermaidSource, onSourceChange])
 
   const commitEdgeLabel = useCallback(() => {
     if (!editingEdgeLabel) return
+    const normalized = editingEdgeLabel.value.replace(/\n/g, '<br>')
+    const oldNormalized = (editingEdgeLabel.oldLabel ?? '').replace(/<br\s*\/?>/gi, '\n')
     // 值没变则不写入,避免不必要修改
-    if (editingEdgeLabel.value === (editingEdgeLabel.oldLabel ?? '')) {
+    if (editingEdgeLabel.value === oldNormalized) {
       setEditingEdgeLabel(null)
       return
     }
-    const next = setEdgeLabel(file.mermaidSource, editingEdgeLabel.from, editingEdgeLabel.to, editingEdgeLabel.value, editingEdgeLabel.oldLabel)
+    const next = setEdgeLabel(file.mermaidSource, editingEdgeLabel.from, editingEdgeLabel.to, normalized, editingEdgeLabel.oldLabel)
     onSourceChange(next)
     setEditingEdgeLabel(null)
   }, [editingEdgeLabel, file.mermaidSource, onSourceChange])
@@ -854,22 +859,6 @@ export function CanvasView({
           selection={selection}
           svgRef={wrapRef}
           onAddEdge={(from, to) => {
-            // §4.2.2 两端形状不同时弹窗确认 — 这里简化为 toast 提示并自动对齐
-            const fromNode = model.nodes.find((n) => n.id === from)
-            const toNode = model.nodes.find((n) => n.id === to)
-            if (fromNode && toNode) {
-              const fromShape = fromNode.shape === 'unknown' ? 'rect' : fromNode.shape
-              const toShape = toNode.shape === 'unknown' ? 'rect' : toNode.shape
-              if (fromShape !== toShape) {
-                onToast('两端节点形状不同,Mermaid 不允许直接相连,需将目标改为矩形')
-                // 自动把目标改为矩形
-                let next = file.mermaidSource
-                next = setNodeShape(next, to, 'rect')
-                next = addEdge(next, from, to)
-                onSourceChange(next)
-                return
-              }
-            }
             const next = addEdge(file.mermaidSource, from, to)
             onSourceChange(next)
             onSelectionChange({ kind: 'edge', from, to })
@@ -894,7 +883,7 @@ export function CanvasView({
         if (g && wrap) {
           const r = g.getBoundingClientRect()
           const wr = wrap.getBoundingClientRect()
-          // input 放节点正中间,水平居中
+          // textarea 放节点正中间,水平居中
           left = r.x - wr.x + r.width / 2
           top = r.y - wr.y + r.height / 2
         }
@@ -903,12 +892,16 @@ export function CanvasView({
             className="text-overlay"
             style={{ left: left + 'px', top: top + 'px', transform: 'translate(-50%, -50%)' }}
           >
-            <input
+            <textarea
               autoFocus
+              rows={Math.max(1, editingText.value.split('\n').length)}
               value={editingText.value}
               onChange={(e) => setEditingText({ ...editingText, value: e.target.value })}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') commitText()
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                  commitText()
+                  e.preventDefault()
+                }
                 if (e.key === 'Escape') setEditingText(null)
                 e.stopPropagation()
               }}
@@ -920,7 +913,6 @@ export function CanvasView({
 
       {/* 边标签浮层 */}
       {editingEdgeLabel && (() => {
-        // 直接用 from/to 节点定位,不用 model.edges.find (避免多边时取到错误边)
         const from = model.nodes.find((n) => n.id === editingEdgeLabel.from)
         const to = model.nodes.find((n) => n.id === editingEdgeLabel.to)
         if (!from || !to) return null
@@ -932,22 +924,25 @@ export function CanvasView({
           const r1 = gFrom.getBoundingClientRect()
           const r2 = gTo.getBoundingClientRect()
           const wr = wrap.getBoundingClientRect()
-          // TD 流程图:边从源节点底部→目标节点顶部,取中点
           const srcBottom = r1.y + r1.height
           const tgtTop = r2.y
           mx = ((r1.x + r1.width / 2) + (r2.x + r2.width / 2)) / 2 - wr.x
-          my = (srcBottom + tgtTop) / 2 - wr.y - 12  // 12 = 半输入框高
+          my = (srcBottom + tgtTop) / 2 - wr.y - 12
         }
         const isUnchanged = editingEdgeLabel.value === (editingEdgeLabel.oldLabel ?? '')
         return (
           <div className="text-overlay" style={{ left: mx + 'px', top: my + 'px' }}>
-            <input
+            <textarea
               autoFocus
+              rows={Math.max(1, editingEdgeLabel.value.split('\n').length)}
               value={editingEdgeLabel.value}
               placeholder="(空 = 无标签)"
               onChange={(e) => setEditingEdgeLabel({ ...editingEdgeLabel, value: e.target.value })}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') commitEdgeLabel()
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                  commitEdgeLabel()
+                  e.preventDefault()
+                }
                 if (e.key === 'Escape') setEditingEdgeLabel(null)
                 e.stopPropagation()
               }}
